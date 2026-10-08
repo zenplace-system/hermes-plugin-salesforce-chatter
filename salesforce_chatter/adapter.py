@@ -455,7 +455,7 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
             if pending:
                 self._replied_sources.add(pending[0])
             return SendResult(success=True, message_id=result.get("id"))
-        except (httpx.HTTPError, ChatterHTTPError, ValueError, OSError) as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ChatterHTTPError, ValueError, OSError) as exc:
             if pending:
                 self._mention_once.setdefault(chat_id, pending)
             logger.warning("salesforce_chatter: image URL delivery failed (%s); posting link", type(exc).__name__)

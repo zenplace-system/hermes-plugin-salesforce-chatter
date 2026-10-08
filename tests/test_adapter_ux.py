@@ -251,3 +251,9 @@ async def test_connect_resolves_bot_name_once_for_approval_prompts(adapter, monk
         assert all("@Approval Bot approve" in texts(body) for body in comments(adapter))
     finally:
         await adapter.disconnect()
+
+
+async def test_malformed_image_url_falls_back_without_crashing(adapter):
+    result = await adapter.send_image("0D5A", "https://[invalid/image.png")
+    assert result.success
+    assert "https://[invalid/image.png" in texts(comments(adapter)[0])
