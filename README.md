@@ -75,6 +75,30 @@ platform_toolsets:
 
 `platform_toolsets` controls the tools available to conversations on this platform. Start with no tools, then explicitly add only the Hermes toolsets your users should be able to invoke. Enabling terminal, file, web, or code execution gives model-driven actions a broader scope than this plugin's Salesforce client. Configure a Docker terminal backend separately if those tools require isolation; the plugin's optional preview container does not sandbox the whole agent.
 
+### Recommended quiet Chatter delivery
+
+Use explicit per-platform display settings on both Hermes 0.21.3 and current main. Global display settings can override platform defaults, and older cores do not apply plugin display tiers. Merge these keys into the blocks above:
+
+```yaml
+display:
+  platforms:
+    salesforce_chatter:
+      tool_progress: "off"
+      interim_assistant_messages: false
+      long_running_notifications: false
+      busy_ack_detail: false
+      busy_steer_ack_enabled: false
+      streaming: false
+      suppress_warning_notifications: true
+platforms:
+  salesforce_chatter:
+    gateway_restart_notification: false
+    home_channel: {chat_id: "0F9xxxxxxxxxxxx"}
+```
+
+Replace the example home channel with a permitted group ID, or set `SF_CHATTER_HOME_CHANNEL`. This avoids repeated no-home-channel notices; `/sethome` is intentionally not allowed from Chatter. `suppress_warning_notifications` is optional and hides core warning diagnostics. To silence busy acknowledgments entirely, set the global environment variable `HERMES_GATEWAY_BUSY_ACK_ENABLED=false`; the display detail settings alone do not disable every busy acknowledgment.
+
+
 ### Environment variables
 
 Nonempty environment values take precedence over the corresponding `extra` fields. List values accept comma-separated IDs; the `extra` equivalents also accept YAML lists. Keep credentials in the environment rather than plaintext config where possible.
@@ -108,9 +132,11 @@ The five required connection fields and two allowlist fields are documented in t
 | `max_catchup_hours` | `24` | Maximum scanner catch-up window after downtime |
 | `max_attachment_mb` | `25` | Per-file download/upload cap in MiB (`1024 × 1024` bytes); not an aggregate session budget |
 | `unauthorized_reply` | `true` | Post a rejection notice for an unauthorized request when writes are enabled; set false for silent rejection |
+| `follow_up_without_mention` | `false` | Accept allowlisted users' comments after the bot has already commented in that thread, unless the comment mentions another user; unauthorized unmentioned follow-ups are always ignored silently |
 | `html_preview` | `false` | Opt in to a Docker-rendered PNG alongside an outgoing HTML file |
 | `preview_image` | `nousresearch/hermes-sandbox:desktop` | Docker image for previews; pre-pull a trusted compatible image and preferably pin its digest |
 | `failure_text` | `Failed to generate a reply. Please wait and mention me again.` | Failure notice |
+| `approval_hint` | `Reply with a comment that mentions me: "@{bot_name} approve" or "@{bot_name} deny".` | Appended to execution-approval prompts; `{bot_name}` uses the bot's display name fetched once at connection, or `{bot}` if unavailable; empty string disables the hint |
 | `unauthorized_text` | `Only authorized users can use this assistant.` | Unauthorized-request notice |
 | `commands_text` | `Available Chatter commands: /new /reset /stop /approve /deny. Write questions in plain text.` | Rejected slash-command notice |
 | `empty_post_text` | `(No message text)` | Input fallback for an empty post |
@@ -155,6 +181,8 @@ Requests processed during dry run are recorded and are not automatically replaye
 
 The plugin authenticates at the **configured Salesforce login host**, then sends API requests to the **instance host returned by Salesforce OAuth**. Attachment downloads follow HTTP redirects, which can contact Salesforce file/content hosts or other redirect destinations; this is **not a strict two-host egress allowlist**. `httpx` removes Authorization on cross-origin redirects except direct same-host HTTP-to-HTTPS upgrades. Validate the configured endpoint and use network policy if strict outbound controls are required.
 
+Image URLs returned by Hermes tools trigger an additional outbound HTTPS fetch to the supplied URL and up to five HTTPS redirects, using a separate client with **no Salesforce Authorization header**. The response must have an `image/*` content type and remain under `max_attachment_mb`; downloaded images are uploaded as Chatter Files. If fetching or uploading fails, the adapter posts the original URL as a link instead. URL credentials and HTTP/downgrade redirects are rejected. These image hosts are not restricted to Salesforce; apply network egress controls for your deployment. Dry run does not fetch outbound images.
+
 The background gateway polls the To Me feed every **60 seconds** by default. It probes allowlisted groups with SOQL every **5 seconds** and fetches changed threads through Connect REST. SOQL still consumes the org's Salesforce API allowance even though it is separate from Chatter's hourly Connect REST limit. More groups, attachments, and active threads increase calls. Monitor Salesforce quotas; `max_replies_per_hour` does not bound API calls.
 
 The plugin has **no telemetry or usage-reporting service** and no self-updater. Hermes model providers, tools, dependency installation, and optional Docker image pulls have their own network behavior and costs; they are not restricted to Salesforce by this plugin.
@@ -173,6 +201,16 @@ With `dry_run: false`, the bot can Like accepted requests, post reply/error/reje
 Authorization is checked before command dispatch. Only `/new`, `/reset`, `/stop`, `/approve`, and `/deny` pass the plugin's slash-command filter. `/approve` and `/deny` remain subject to Hermes's approval handling; this plugin does not auto-approve tool execution. Restrict the allowlist to people you trust with the configured model/tools. The filter is not a sandbox against malicious prompts or attachments.
 
 Unauthorized mentions can receive one rejection notice per claimed source item by default, even though no model reply is generated. Set `unauthorized_reply: false` to avoid that write. The default dry-run setting suppresses these notices too.
+
+### Replies, approvals, and follow-ups
+
+Final replies mention the requester once, on the first comment chunk, rather than on interim or approval messages. Legacy sends without notification markers retain first-send behavior. Replies are split at paragraph or line boundaries within a 9,000-character plain-text budget, with balanced Chatter markup and conservative space reserved for unresolved mention display names. Trailing blank paragraphs are removed. The adapter declares message editing unsupported so Hermes does not stream editable partial comments. If delivery stops after a chunk succeeds, that partial reply is not automatically replayed in full.
+
+Execution approvals still require a Chatter comment mentioning the bot: `@Bot /approve`, `@Bot /approve session`, `@Bot /approve always`, or `@Bot /deny`. While an approval is pending, `@Bot yes` and `@Bot approve` also work. The actual bot name is shown in the prompt hint. Inline command and clarification responses are recorded as handled, not left pending. `liked` and `handled` inbox rows do not count toward the reply admission cap.
+
+Unmentioned follow-ups are off by default. With `follow_up_without_mention: true`, only comments from allowlisted users after an earlier bot comment qualify; comments directed at another user do not. Both scanning paths apply the same rule, existing catch-up limits, and source-ID duplicate suppression. The scanner can only recognize earlier bot comments included in the retrieved thread; it does not search the full historical conversation.
+
+Turn failures produce the configured `failure_text` once, without an additional core-generated exception-detail comment. Permanent Salesforce 400/401/403/404 delivery refusals do not trigger a plain-text resend; `REQUEST_LIMIT_EXCEEDED` and server failures remain retryable.
 
 ### Optional HTML previews
 
@@ -197,6 +235,7 @@ Have a Salesforce administrator review and remove unwanted bot comments, posts, 
 
 - The first run does not answer historical mentions from before initialization. After a restart, catch-up is limited by `max_catchup_hours` and Salesforce feed visibility/pagination.
 - Fast polling applies only to allowlisted groups whose IDs start with `0F9`. Other eligible mentions arrive through the selected feed and may take at least a polling interval; delivery is not real-time.
+- Adding a mention by editing an old comment is not guaranteed to trigger a new scan; post a new comment instead.
 - The inbox favors duplicate suppression. A crash after claiming a request can leave it without a reply; Hermes recovery is not an exactly-once delivery guarantee.
 - One parent post/thread maps to one Hermes session. Recent thread context is limited (up to 10 preceding comments); a large or busy thread is not imported in full.
 - Chatter has no native Markdown headings or tables. The adapter converts supported formatting and flattens unsupported structures. Like is an acknowledgement, not proof that a reply completed.

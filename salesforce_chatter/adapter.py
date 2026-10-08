@@ -10,9 +10,12 @@ import dataclasses
 import logging
 import mimetypes
 import re
+from contextvars import ContextVar
 from datetime import timedelta
 from pathlib import Path
 
+
+import httpx
 from gateway.config import Platform, PlatformConfig
 from gateway.platform_registry import PlatformEntry
 from gateway.platforms._shared import get_scoped_secret
@@ -25,7 +28,8 @@ from .sfchatter.client import ChatterClient, ChatterHTTPError
 from .sfchatter.inbox import Claim, Inbox, utc_now
 from .sfchatter.preview import render_html_preview
 from .sfchatter.scanner import Candidate, probe_groups, scan_feed
-from .sfchatter.segments import reply_body, same_sf_id
+from .sfchatter.segments import reply_body, reply_bodies, same_sf_id
+from .sfchatter.media import download_image
 from .sfchatter.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -86,6 +90,10 @@ def validate_config(config: PlatformConfig) -> bool:
 
 
 class SalesforceChatterAdapter(BasePlatformAdapter):
+    MAX_MESSAGE_LENGTH = 9000
+    splits_long_messages = True
+    SUPPORTS_MESSAGE_EDITING = False
+
     def __init__(self, config: PlatformConfig) -> None:
         super().__init__(config, Platform(PLATFORM_NAME))
         self._settings = _settings(config)
@@ -95,6 +103,9 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
         # Mention the requester only in the first comment to avoid duplicate notifications.
         # chat_id -> (accepted post/comment ID, requester ID)
         self._mention_once: dict[str, tuple[str, str]] = {}
+        self._bot_name = "{bot}"
+        self._inline_reply = ContextVar("chatter_inline_reply", default=False)
+        self._replied_sources: set[str] = set()
 
     # ---- Connection ---------------------------------------------------------
 
@@ -114,6 +125,11 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
             await self._client.aclose()
             release_scoped_lock(PLATFORM_NAME, s.bot_user_id[:15])
             return False
+        try:
+            me = await self._client.get_json("chatter/users/me")
+            self._bot_name = str(me.get("displayName") or me.get("name") or "{bot}")
+        except (ChatterHTTPError, httpx.HTTPError, ValueError):
+            logger.warning("salesforce_chatter: bot display name unavailable; approval hint uses placeholder")
         self._mark_connected()
         self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info(
@@ -181,7 +197,7 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
         if not self._is_allowed_user(c.requester_id):
             self._inbox.set_status(c.source_id, "skipped_unauthorized")
             logger.info("salesforce_chatter: unauthorized requester source=%s user=%s", c.source_id, c.requester_id)
-            if self._settings.unauthorized_reply:
+            if self._settings.unauthorized_reply and not c.follow_up_without_mention:
                 await self._post_notice(c.feed_element_id, c.requester_id, self._settings.unauthorized_text)
             return
         command = c.text.lstrip()
@@ -197,7 +213,7 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
         # Acknowledge immediately, before the request enters the generation queue.
         await self._like(c.source_id, c.kind)
         self._inbox.set_status(c.source_id, "liked")
-        self._mention_once[c.feed_element_id] = (c.source_id, c.requester_id)
+        self._mention_once.setdefault(c.feed_element_id, (c.source_id, c.requester_id))
 
         media_urls, media_types, notes = await self._download_attachments(c)
         text = c.text or self._settings.empty_post_text
@@ -227,9 +243,16 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
             channel_context=c.thread_context or None,
             metadata={"sf_kind": c.kind},
         )
-        logger.info("salesforce_chatter: dispatch source=%s kind=%s thread=%s files=%d",
-                    c.source_id, c.kind, c.feed_element_id, len(media_urls))
-        await self.handle_message(event)
+        logger.info("salesforce_chatter: dispatch source=%s kind=%s thread=%s files=%d follow_up=%s",
+                    c.source_id, c.kind, c.feed_element_id, len(media_urls), c.follow_up_without_mention)
+        token = self._inline_reply.set(asyncio.current_task())
+        try:
+            await self.handle_message(event)
+        finally:
+            self._inline_reply.reset(token)
+        # run_busy rewrites accepted bare approval words into slash commands.
+        if event.text != text and event.get_command() in {"approve", "deny"}:
+            self._inbox.set_status(c.source_id, "handled")
 
     async def _download_attachments(self, c: Candidate) -> tuple[list[str], list[str], list[str]]:
         urls: list[str] = []
@@ -275,26 +298,54 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
         except ChatterHTTPError as exc:
             logger.warning("salesforce_chatter: notice failed thread=%s status=%s code=%s", chat_id, exc.status, exc.code)
 
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        if event.message_id and event.source.user_id:
+            self._mention_once[event.source.chat_id] = (event.message_id, event.source.user_id)
+
+    async def _dispatch_inline_reply(self, event: MessageEvent, *, log_cmd=None) -> None:
+        token = self._inline_reply.set(asyncio.current_task())
+        try:
+            await super()._dispatch_inline_reply(event, log_cmd=log_cmd)
+        except BaseException:
+            self._inbox.set_status(event.message_id, "failed")
+            raise
+        else:
+            self._inbox.set_status(event.message_id, "handled")
+        finally:
+            self._inline_reply.reset(token)
+
+    async def _notify_turn_error(self, event: MessageEvent, e: BaseException):
+        # Both supported cores invoke on_processing_complete(FAILURE) first.
+        # That hook owns the configurable user-facing notice; never leak a second
+        # core-generated exception message (or suppress unrelated later notices).
+        return None
+
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         logger.info("salesforce_chatter: processing complete source=%s outcome=%s", event.message_id, outcome.value)
         if not event.message_id:
             # Internal resume events have no Chatter post; leave the inbox and pending mention unchanged.
             return
         status = {
-            ProcessingOutcome.SUCCESS: "answered",
+            ProcessingOutcome.SUCCESS: "answered" if event.message_id in self._replied_sources else "handled",
             ProcessingOutcome.FAILURE: "failed",
             ProcessingOutcome.CANCELLED: "cancelled",
         }[outcome]
         if outcome is ProcessingOutcome.FAILURE:
-            await self.send(event.source.chat_id, self._settings.failure_text)
+            await self.send(event.source.chat_id, self._settings.failure_text, metadata={"notify": True})
         pending = self._mention_once.get(event.source.chat_id)
         if pending and pending[0] == event.message_id:
             del self._mention_once[event.source.chat_id]
         self._inbox.set_status(event.message_id, status)
+        self._replied_sources.discard(event.message_id)
 
     # ---- Sending ------------------------------------------------------------
 
-    def _take_requester(self, chat_id: str) -> tuple[str, str] | None:
+    def _take_requester(self, chat_id: str, metadata=None) -> tuple[str, str] | None:
+        if self._inline_reply.get() is asyncio.current_task():
+            return None
+        if metadata and not metadata.get("notify") and any(
+                key in metadata for key in ("notify", "_interim_send", "is_approval_prompt")):
+            return None
         return self._mention_once.pop(chat_id, None)
 
     async def _post(self, chat_id: str, body: dict, *, file_id: str | None = None) -> dict:
@@ -304,24 +355,41 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
             return await self._client.post_comment(chat_id, body, file_id=file_id)
         return await self._client.post_feed_item(chat_id, body, file_id=file_id)
 
-    async def send(self, chat_id, content, reply_to=None, metadata=None) -> SendResult:
-        pending = self._take_requester(chat_id)
-        body = reply_body(pending[1] if pending else None, content, empty_reply_text=self._settings.empty_reply_text)
-        if self._settings.dry_run:
-            logger.info("salesforce_chatter: [dry-run] comment thread=%s chars=%d", chat_id, len(content))
-            return SendResult(success=True, message_id=f"dry-run:{chat_id}")
-        try:
-            data = await self._post(chat_id, body)
-        except ChatterHTTPError as exc:
-            if pending:
-                self._mention_once.setdefault(chat_id, pending)
-            logger.warning("salesforce_chatter: comment failed thread=%s status=%s code=%s", chat_id, exc.status, exc.code)
-            return SendResult(success=False, error=f"{exc.status} {exc.code}", retryable=exc.status >= 500)
-        logger.info("salesforce_chatter: comment sent thread=%s comment=%s mention=%s chars=%d",
-                    chat_id, data.get("id"), bool(pending), len(content))
-        return SendResult(success=True, message_id=data.get("id"))
+    def _send_retry_is_final(self, result: SendResult) -> bool:
+        if (result.raw_response or {}).get("partial_overflow"):
+            return True
+        status, _, code = (result.error or "").partition(" ")
+        return status in {"400", "401", "403", "404"} and code != "REQUEST_LIMIT_EXCEEDED"
 
-    async def _send_file(self, chat_id: str, path: str, caption: str | None, file_name: str | None) -> SendResult:
+    async def send(self, chat_id, content, reply_to=None, metadata=None) -> SendResult:
+        if metadata and metadata.get("is_approval_prompt") and self._settings.approval_hint:
+            hint = self._settings.approval_hint.replace("{bot_name}", self._bot_name)
+            content = f"{content.rstrip()}\n\n{hint}"
+        pending = self._take_requester(chat_id, metadata)
+        bodies = reply_bodies(pending[1] if pending else None, content,
+                              max_length=self.MAX_MESSAGE_LENGTH,
+                              empty_reply_text=self._settings.empty_reply_text)
+        if self._settings.dry_run:
+            logger.info("salesforce_chatter: [dry-run] comment thread=%s chunks=%d", chat_id, len(bodies))
+            return SendResult(success=True, message_id=f"dry-run:{chat_id}")
+        sent = []
+        for body in bodies:
+            try:
+                data = await self._post(chat_id, body)
+            except ChatterHTTPError as exc:
+                if pending and not sent:
+                    self._mention_once.setdefault(chat_id, pending)
+                logger.warning("salesforce_chatter: comment failed thread=%s status=%s code=%s", chat_id, exc.status, exc.code)
+                return SendResult(success=False, error=f"{exc.status} {exc.code}",
+                                  retryable=not sent and (exc.status >= 500 or exc.code == "REQUEST_LIMIT_EXCEEDED"),
+                                  raw_response={"partial_overflow": bool(sent), "message_ids": sent})
+            sent.append(data.get("id"))
+            if pending:
+                self._replied_sources.add(pending[0])
+        logger.info("salesforce_chatter: comment sent thread=%s chunks=%d mention=%s", chat_id, len(sent), bool(pending))
+        return SendResult(success=True, message_id=sent[-1], raw_response={"message_ids": sent})
+
+    async def _send_file(self, chat_id: str, path: str, caption: str | None, file_name: str | None, metadata=None) -> SendResult:
         file_path = Path(path)
         # Remove the sandbox cache's remote_<hash>_ prefix from the display name.
         name = _REMOTE_PREFIX.sub("", file_name or file_path.name)
@@ -339,12 +407,14 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
         if mime == "text/html" and self._settings.html_preview:
             preview = await render_html_preview(
                 data, work_dir=plugin_data_dir(PLUGIN_ID) / "preview", image=self._settings.preview_image)
-        pending = self._take_requester(chat_id)
+        pending = self._take_requester(chat_id, metadata)
         requester = pending[1] if pending else None
         try:
             file_id = await self._client.upload_file(data, filename=name, mime_type=mime)
             html_caption = self._settings.html_download_caption.format(name=name) if preview else name
             result = await self._post(chat_id, reply_body(requester, caption or html_caption, empty_reply_text=self._settings.empty_reply_text), file_id=file_id)
+            if pending:
+                self._replied_sources.add(pending[0])
             if preview:
                 # Chatter cannot preview HTML. Post the image last so the feed's latest
                 # comment shows the content without requiring the file to be opened.
@@ -360,16 +430,37 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=result.get("id"))
 
     async def send_document(self, chat_id, file_path, caption=None, file_name=None, reply_to=None, metadata=None, **kwargs) -> SendResult:
-        return await self._send_file(chat_id, file_path, caption, file_name)
+        return await self._send_file(chat_id, file_path, caption, file_name, metadata)
 
     async def send_image_file(self, chat_id, image_path, caption=None, reply_to=None, metadata=None, **kwargs) -> SendResult:
-        return await self._send_file(chat_id, image_path, caption, None)
+        return await self._send_file(chat_id, image_path, caption, None, metadata)
 
     async def send_video(self, chat_id, video_path, caption=None, reply_to=None, metadata=None, **kwargs) -> SendResult:
-        return await self._send_file(chat_id, video_path, caption, None)
+        return await self._send_file(chat_id, video_path, caption, None, metadata)
 
     async def send_voice(self, chat_id, audio_path, caption=None, reply_to=None, metadata=None, **kwargs) -> SendResult:
-        return await self._send_file(chat_id, audio_path, caption, None)
+        return await self._send_file(chat_id, audio_path, caption, None, metadata)
+
+    async def send_image(self, chat_id, image_url, caption=None, reply_to=None, metadata=None) -> SendResult:
+        if self._settings.dry_run:
+            return SendResult(success=True, message_id=f"dry-run:{chat_id}")
+        pending = None
+        try:
+            data, mime, name = await download_image(image_url, max_bytes=self._settings.max_attachment_bytes)
+            file_id = await self._client.upload_file(data, filename=name, mime_type=mime)
+            pending = self._take_requester(chat_id, metadata)
+            result = await self._post(chat_id, reply_body(
+                pending[1] if pending else None, caption or name,
+                empty_reply_text=self._settings.empty_reply_text), file_id=file_id)
+            if pending:
+                self._replied_sources.add(pending[0])
+            return SendResult(success=True, message_id=result.get("id"))
+        except (httpx.HTTPError, ChatterHTTPError, ValueError, OSError) as exc:
+            if pending:
+                self._mention_once.setdefault(chat_id, pending)
+            logger.warning("salesforce_chatter: image URL delivery failed (%s); posting link", type(exc).__name__)
+            return await self.send(chat_id, f"{caption}\n{image_url}" if caption else image_url,
+                                   reply_to=reply_to, metadata=metadata)
 
     async def get_chat_info(self, chat_id: str) -> dict:
         return {"name": chat_id, "type": "group"}
