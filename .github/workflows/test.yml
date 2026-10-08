@@ -25,6 +25,12 @@ jobs:
           ref: ${{ matrix.hermes-ref }}
           path: .hermes-agent
 
+      - name: Plugin directory carries the same README and LICENSE
+        # Installs and the Hermes catalog page use salesforce_chatter/ only.
+        run: |
+          cmp README.md salesforce_chatter/README.md
+          cmp LICENSE salesforce_chatter/LICENSE
+
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.14"  # the interpreter Hermes installs; main relies on 3.14-only deps
