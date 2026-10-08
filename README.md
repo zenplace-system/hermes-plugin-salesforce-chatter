@@ -145,7 +145,11 @@ The five required connection fields and two allowlist fields are documented in t
 | `attachment_failed_note` | `[Attachment '{title}' could not be loaded]` | Model context note for a failed attachment download |
 | `attachment_unreadable_note` | `[Attachment '{title}' could not be loaded as an image]` | Model context note when media caching cannot read an attachment |
 | `html_download_caption` | `{name} (download and open in a browser)` | HTML comment caption when a preview exists and the caller supplied no caption |
-| `html_preview_caption` | `{name} preview (image)` | Caption for the rendered PNG comment |
+| `html_preview_caption` | `{name} preview (image)` | Caption when the preview fits in one image |
+| `html_preview_page_height` | `1600` | Long pages are cut into images of this height (1280 px wide) at blank rows, so each stays readable in the feed |
+| `html_preview_max_pages` | `5` | Maximum preview images per HTML file (1-20); the page is rendered up to `page_height × max_pages` |
+| `html_preview_page_caption` | `{name} preview ({page}/{pages})` | Caption for each image of a multi-image preview |
+| `html_preview_truncated_note` | `The preview stops here; download {name} for the rest.` | Added to the last image when the page is longer than the rendered height |
 
 Customize the text fields to localize notices. Attachment notes substitute `{title}` with the attachment title; HTML captions substitute `{name}` with the filename.
 
@@ -214,7 +218,7 @@ Turn failures produce the configured `failure_text` once, without an additional 
 
 ### Optional HTML previews
 
-HTML previews are **off by default**. With `html_preview: true`, outgoing HTML (including model-generated HTML) is rendered by Chromium in a Docker container, never opened in the host browser. The renderer uses no container network, a read-only root filesystem, dropped Linux capabilities, `no-new-privileges`, a 1 GiB memory limit, one CPU, and a 256-process limit. A dedicated temporary directory containing the input and output is mounted read-write; `/tmp` is a 256 MiB temporary filesystem for Chromium's profile. The host waits up to 60 seconds for rendering and kills the Docker CLI on timeout; administrators should check for a surviving container after a timeout.
+HTML previews are **off by default**. With `html_preview: true`, the HTML file is posted first, then its preview as one or more images in reading order. Outgoing HTML (including model-generated HTML) is rendered by Chromium in a Docker container, never opened in the host browser. The renderer uses no container network, a read-only root filesystem, dropped Linux capabilities, `no-new-privileges`, a 1 GiB memory limit, one CPU, and a 256-process limit. A dedicated temporary directory containing the input and output is mounted read-write; `/tmp` is a 256 MiB temporary filesystem for Chromium's profile. The host waits up to 60 seconds for rendering and kills the Docker CLI on timeout; administrators should check for a surviving container after a timeout.
 
 Treat Docker and the configured image as trusted execution dependencies. Pre-pull and inspect the image before enabling previews; an image pull can contact a registry even though the renderer's container network is disabled. If preview rendering fails, the HTML file is still delivered without the PNG. Do not open untrusted HTML locally merely because a preview was generated.
 

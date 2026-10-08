@@ -57,6 +57,45 @@ def crop_to_content(png: bytes, *, margin: int = 32) -> bytes:
         return out.getvalue()
 
 
+def image_height(png: bytes) -> int:
+    from PIL import Image
+
+    with Image.open(io.BytesIO(png)) as img:
+        return img.height
+
+
+def split_pages(png: bytes, *, page_height: int, search: int = 240) -> list[bytes]:
+    """Cut a tall screenshot into readable pages.
+
+    A single full-page image of a long document is shrunk to an unreadable strip
+    in the feed. Cut at a blank row (one colour across the width) within
+    ``search`` pixels above each page boundary so text lines are not sliced.
+    """
+    from PIL import Image
+
+    with Image.open(io.BytesIO(png)) as img:
+        rgb = img.convert("RGB")
+        width, height = rgb.size
+        if height <= page_height:
+            return [png]
+        pages: list[bytes] = []
+        top = 0
+        while top < height:
+            bottom = min(height, top + page_height)
+            if bottom < height:
+                for y in range(bottom, max(top + page_height // 2, bottom - search), -1):
+                    row = rgb.crop((0, y - 1, width, y))
+                    lo, hi = zip(*row.getextrema())
+                    if lo == hi:
+                        bottom = y
+                        break
+            out = io.BytesIO()
+            rgb.crop((0, top, width, bottom)).save(out, format="PNG", optimize=True)
+            pages.append(out.getvalue())
+            top = bottom
+        return pages
+
+
 async def render_html_preview(
     html: bytes,
     *,

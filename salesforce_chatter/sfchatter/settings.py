@@ -54,6 +54,9 @@ class Settings:
     # Optionally attach a PNG preview because Chatter cannot preview HTML.
     html_preview: bool = False
     preview_image: str = "nousresearch/hermes-sandbox:desktop"
+    # Long pages are cut into readable images of this height (1280 px wide).
+    html_preview_page_height: int = 1600
+    html_preview_max_pages: int = 5
     failure_text: str = "Failed to generate a reply. Please wait and mention me again."
     unauthorized_text: str = "Only authorized users can use this assistant."
     commands_text: str = "Available Chatter commands: /new /reset /stop /approve /deny. Write questions in plain text."
@@ -65,6 +68,8 @@ class Settings:
     attachment_unreadable_note: str = "[Attachment '{title}' could not be loaded as an image]"
     html_download_caption: str = "{name} (download and open in a browser)"
     html_preview_caption: str = "{name} preview (image)"
+    html_preview_page_caption: str = "{name} preview ({page}/{pages})"
+    html_preview_truncated_note: str = "The preview stops here; download {name} for the rest."
 
     @property
     def group_ids(self) -> tuple[str, ...]:
@@ -101,6 +106,8 @@ class Settings:
             unauthorized_reply=_bool(extra.get("unauthorized_reply"), True),
             html_preview=_bool(extra.get("html_preview"), False),
             preview_image=str(extra.get("preview_image") or "nousresearch/hermes-sandbox:desktop"),
+            html_preview_page_height=max(400, int(extra.get("html_preview_page_height", cls.html_preview_page_height))),
+            html_preview_max_pages=max(1, min(20, int(extra.get("html_preview_max_pages", cls.html_preview_max_pages)))),
             failure_text=str(extra.get("failure_text", cls.failure_text)),
             unauthorized_text=str(extra.get("unauthorized_text", cls.unauthorized_text)),
             commands_text=str(extra.get("commands_text", cls.commands_text)),
@@ -112,4 +119,6 @@ class Settings:
             attachment_unreadable_note=str(extra.get("attachment_unreadable_note", cls.attachment_unreadable_note)),
             html_download_caption=str(extra.get("html_download_caption", cls.html_download_caption)),
             html_preview_caption=str(extra.get("html_preview_caption", cls.html_preview_caption)),
+            html_preview_page_caption=str(extra.get("html_preview_page_caption", cls.html_preview_page_caption)),
+            html_preview_truncated_note=str(extra.get("html_preview_truncated_note", cls.html_preview_truncated_note)),
         )

@@ -26,7 +26,7 @@ from plugins.plugin_storage import plugin_data_dir
 
 from .sfchatter.client import ChatterClient, ChatterHTTPError
 from .sfchatter.inbox import Claim, Inbox, utc_now
-from .sfchatter.preview import render_html_preview
+from .sfchatter.preview import image_height, render_html_preview, split_pages
 from .sfchatter.scanner import Candidate, probe_groups, scan_feed
 from .sfchatter.segments import reply_body, reply_bodies, same_sf_id
 from .sfchatter.media import download_image
@@ -403,10 +403,17 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
         if len(data) > self._settings.max_attachment_bytes:
             return SendResult(success=False, error="file too large")
         mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
-        preview = None
+        pages: list[bytes] = []
+        truncated = False
         if mime == "text/html" and self._settings.html_preview:
-            preview = await render_html_preview(
-                data, work_dir=plugin_data_dir(PLUGIN_ID) / "preview", image=self._settings.preview_image)
+            s = self._settings
+            max_height = s.html_preview_page_height * s.html_preview_max_pages
+            png = await render_html_preview(
+                data, work_dir=plugin_data_dir(PLUGIN_ID) / "preview", image=s.preview_image, max_height=max_height)
+            if png:
+                pages = await asyncio.to_thread(split_pages, png, page_height=s.html_preview_page_height)
+                truncated = await asyncio.to_thread(image_height, png) >= max_height
+        preview = bool(pages)
         pending = self._take_requester(chat_id, metadata)
         requester = pending[1] if pending else None
         try:
@@ -415,18 +422,24 @@ class SalesforceChatterAdapter(BasePlatformAdapter):
             result = await self._post(chat_id, reply_body(requester, caption or html_caption, empty_reply_text=self._settings.empty_reply_text), file_id=file_id)
             if pending:
                 self._replied_sources.add(pending[0])
-            if preview:
-                # Chatter cannot preview HTML. Post the image last so the feed's latest
-                # comment shows the content without requiring the file to be opened.
+            for index, page in enumerate(pages, start=1):
+                # Chatter cannot preview HTML. Post the pages last, in order, so the feed's
+                # latest comments show the content without requiring the file to be opened.
                 image_id = await self._client.upload_file(
-                    preview, filename=f"{Path(name).stem}-preview.png", mime_type="image/png")
-                result = await self._post(chat_id, reply_body(None, self._settings.html_preview_caption.format(name=name), empty_reply_text=self._settings.empty_reply_text), file_id=image_id)
+                    page, filename=f"{Path(name).stem}-preview{'' if len(pages) == 1 else f'-{index}'}.png",
+                    mime_type="image/png")
+                text = (self._settings.html_preview_caption.format(name=name) if len(pages) == 1 else
+                        self._settings.html_preview_page_caption.format(name=name, page=index, pages=len(pages)))
+                if truncated and index == len(pages):
+                    text = f"{text}\n{self._settings.html_preview_truncated_note.format(name=name)}"
+                result = await self._post(chat_id, reply_body(None, text, empty_reply_text=self._settings.empty_reply_text), file_id=image_id)
         except ChatterHTTPError as exc:
             if pending:
                 self._mention_once.setdefault(chat_id, pending)
             logger.warning("salesforce_chatter: file send failed thread=%s status=%s code=%s", chat_id, exc.status, exc.code)
             return SendResult(success=False, error=f"{exc.status} {exc.code}", retryable=exc.status >= 500)
-        logger.info("salesforce_chatter: file sent thread=%s file=%s preview=%s", chat_id, file_id, bool(preview))
+        logger.info("salesforce_chatter: file sent thread=%s file=%s preview_pages=%d truncated=%s",
+                    chat_id, file_id, len(pages), truncated)
         return SendResult(success=True, message_id=result.get("id"))
 
     async def send_document(self, chat_id, file_path, caption=None, file_name=None, reply_to=None, metadata=None, **kwargs) -> SendResult:
