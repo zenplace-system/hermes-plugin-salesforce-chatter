@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .richtext import markdown_to_segments
+from .richtext import markdown_to_segments, segments_text_length, split_segments
 
 _BLOCK_END = {"Paragraph", "ListItem"}
 
@@ -53,5 +53,24 @@ def reply_body(requester_id: str | None, markdown: str, *, empty_reply_text: str
     if requester_id:
         segments += [{"type": "Mention", "id": requester_id}, {"type": "Text", "text": " "}]
     body = markdown_to_segments(markdown)
-    segments += body or [{"type": "Text", "text": markdown.strip() or empty_reply_text}]
+    segments += body or [{"type": "Text", "text": empty_reply_text.rstrip()}]
     return {"body": {"messageSegments": segments}}
+
+
+def reply_bodies(
+    requester_id: str | None,
+    text: str,
+    *,
+    max_length: int = 9000,
+    empty_reply_text: str = "(Empty reply)",
+) -> list[dict[str, Any]]:
+    """Build bounded, balanced reply bodies with the requester mentioned once.
+
+    The first chunk reserves 256 characters for the unresolved mention name,
+    plus its separating space. Subsequent chunks contain only reply content.
+    """
+    prefix_length = segments_text_length([{"type": "Mention", "id": requester_id}]) + 1 if requester_id else 0
+    if max_length <= prefix_length:
+        raise ValueError("max_length must leave room for reply text after the mention")
+    segments = reply_body(requester_id, text, empty_reply_text=empty_reply_text)["body"]["messageSegments"]
+    return [{"body": {"messageSegments": chunk}} for chunk in split_segments(segments, max_length)]

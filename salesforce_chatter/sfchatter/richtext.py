@@ -8,8 +8,11 @@ Paragraph, Bold, Italic, UnorderedList, OrderedList, ListItem, and Code.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any
 
+
+_TEXT_BREAKS = {"Paragraph", "ListItem"}
 Segment = dict[str, Any]
 
 _FENCE = re.compile(r"^\s*```")
@@ -114,8 +117,133 @@ def markdown_to_segments(markdown: str) -> list[Segment]:
         elif line.strip() and not re.fullmatch(r"\s*(-{3,}|\*{3,}|_{3,})\s*", line):
             out += _paragraph(line)
         i += 1
-    return out
+    return trim_trailing_segments(out)
 
 
 def segments_text_length(segments: list[Segment]) -> int:
-    return sum(len(s.get("text") or "") for s in segments)
+    """Budget text, paragraph/list newlines, and unresolved mention names.
+
+    Mention inputs have an ID but no display name, so reserve 256 characters
+    (or a longer returned mention text). Formatting tags themselves cost zero.
+    """
+    length = 0
+    for segment in segments:
+        kind = segment.get("type")
+        if kind == "Mention":
+            length += max(256, len(segment.get("text") or ""))
+        elif kind == "Text":
+            length += len(segment.get("text") or "")
+        elif kind == "MarkupEnd" and segment.get("markupType") in _TEXT_BREAKS:
+            length += 1
+    return length
+
+
+def trim_trailing_segments(segments: list[Segment]) -> list[Segment]:
+    """Remove trailing whitespace/empty blocks while retaining balanced markup."""
+    for last in range(len(segments) - 1, -1, -1):
+        segment = segments[last]
+        if segment["type"] == "Mention" or (
+            segment["type"] == "Text" and segment["text"].strip()
+        ):
+            break
+    else:
+        return []
+    out = segments[:last + 1]
+    if out[-1]["type"] == "Text":
+        out[-1] = {**out[-1], "text": out[-1]["text"].rstrip()}
+    stack: list[str] = []
+    for segment in out:
+        if segment["type"] == "MarkupBegin":
+            stack.append(segment["markupType"])
+        elif segment["type"] == "MarkupEnd":
+            stack.pop()
+    out.extend(_end(kind) for kind in reversed(stack))
+    return out
+
+
+def _segment_units(segments: list[Segment]) -> Iterator[list[Segment]]:
+    """Yield paragraphs, list items, or code lines as preferred split units."""
+    unit: list[Segment] = []
+    for segment in segments:
+        if segment["type"] == "Text":
+            for line in segment["text"].splitlines(keepends=True):
+                unit.append(_text(line))
+                if line.endswith(("\n", "\r")):
+                    yield unit
+                    unit = []
+        else:
+            unit.append(segment)
+            if segment["type"] == "MarkupEnd" and segment["markupType"] in {
+                "Paragraph", "ListItem", "Code",
+            }:
+                yield unit
+                unit = []
+    if unit:
+        yield unit
+
+
+def split_segments(segments: list[Segment], max_length: int) -> list[list[Segment]]:
+    """Split converted text, closing/reopening active markup at each boundary.
+
+    Hermes' Markdown splitter preserves code fences, but cannot preserve Chatter
+    markup or measure expanded links and mentions. Split the actual segments
+    instead. Boundary whitespace is trimmed; hard splits retain word spacing.
+    """
+    chunks: list[list[Segment]] = []
+    current: list[Segment] = []
+    stack: list[str] = []
+    length = 0
+    has_text = False
+
+    def flush() -> None:
+        nonlocal current, length, has_text
+        finished = trim_trailing_segments(current)
+        if finished:
+            chunks.append(finished)
+        current = [_begin(kind) for kind in stack]
+        length = 0
+        has_text = False
+
+    for unit in _segment_units(segments):
+        if has_text and length + segments_text_length(unit) > max_length:
+            flush()
+        for segment in unit:
+            kind = segment["type"]
+            if kind == "MarkupBegin":
+                stack.append(segment["markupType"])
+            elif kind == "MarkupEnd":
+                if stack.pop() in _TEXT_BREAKS:
+                    length += 1
+            elif kind == "Text":
+                value = segment["text"]
+                while value:
+                    closing_length = sum(markup in _TEXT_BREAKS for markup in stack)
+                    available = max_length - length - closing_length
+                    if available <= 0:
+                        if not has_text:
+                            raise ValueError("max_length cannot fit text and its paragraph break")
+                        flush()
+                        available = max_length - closing_length
+                        if available <= 0:
+                            raise ValueError("max_length cannot fit text and its paragraph break")
+                    end = min(len(value), available)
+                    if end < len(value):
+                        end = len(value[:end].rstrip()) or end
+                    part = value[:end]
+                    current.append(_text(part))
+                    length += len(part)
+                    has_text = has_text or bool(part.strip())
+                    value = value[end:]
+                    if value:
+                        flush()
+                continue
+            elif kind == "Mention":
+                mention_length = segments_text_length([segment])
+                if mention_length > max_length:
+                    raise ValueError("max_length cannot fit a mention")
+                if length + mention_length > max_length:
+                    flush()
+                length += mention_length
+            current.append(segment)
+    flush()
+    return chunks

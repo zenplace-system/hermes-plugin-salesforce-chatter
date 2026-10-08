@@ -1,4 +1,4 @@
-from sfchatter.richtext import markdown_to_segments
+from sfchatter.richtext import markdown_to_segments, segments_text_length
 
 
 def B(kind):
@@ -59,3 +59,22 @@ def test_markups_are_balanced_for_mixed_input():
             depth -= 1
         assert depth >= 0
     assert depth == 0
+
+
+def test_text_length_reserves_mentions_and_paragraph_breaks():
+    assert segments_text_length([
+        B("Paragraph"), {"type": "Mention", "id": "005000000000ABCAAA"},
+        T(" hello"), E("Paragraph"),
+    ]) == 263
+    assert segments_text_length([
+        {"type": "Mention", "text": "@" + "a" * 300, "record": {"id": "005000000000ABCAAA"}},
+    ]) == 301
+
+
+def test_converter_discards_trailing_empty_list_items_and_code_whitespace():
+    assert markdown_to_segments("answer\n-  \n- \t") == [
+        B("Paragraph"), T("answer"), E("Paragraph"),
+    ]
+    assert markdown_to_segments("```\nanswer\n \t\n```") == [
+        B("Code"), T("answer"), E("Code"),
+    ]
