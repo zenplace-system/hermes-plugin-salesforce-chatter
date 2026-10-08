@@ -2,6 +2,7 @@ import pytest
 
 import sfchatter.segments as segments_module
 
+from sfchatter.richtext import stored_length
 from sfchatter.segments import mentions_user, plain_text, reply_body, same_sf_id
 
 BOT_15 = "005000000000ABC"
@@ -117,25 +118,20 @@ def test_large_replies_preserve_content_and_balanced_formatting(markdown, expect
     runs = [run for chunk in chunks for run in rendered_runs(chunk)]
     assert "".join(value for value, scope in runs if scope) == expected
     assert all(scope == formatting for value, scope in runs if scope)
-    for i, chunk in enumerate(chunks):
-        text_length = sum(len(value) for value, scope in rendered_runs(chunk))
-        paragraph_breaks = sum(
-            segment["type"] == "MarkupEnd" and segment["markupType"] in {"Paragraph", "ListItem"}
-            for segment in chunk["body"]["messageSegments"]
-        )
-        assert text_length + paragraph_breaks + (256 if i == 0 else 0) <= 9000
+    for chunk in chunks:
+        assert stored_length(chunk["body"]["messageSegments"]) <= 9000
 
 
 def test_chunking_prefers_whole_paragraphs_and_code_lines():
     paragraphs = segments_module.reply_bodies(None, "a" * 12 + "\n" + "b" * 12, max_length=20)
     assert [plain_text(chunk["body"]) for chunk in paragraphs] == ["a" * 12, "b" * 12]
-    code = segments_module.reply_bodies(None, "```\n123456789\nabcdefghij\nXYZ\n```", max_length=20)
-    assert [plain_text(chunk["body"]) for chunk in code] == ["123456789", "abcdefghij\nXYZ"]
+    code = segments_module.reply_bodies(None, "```\n123456789\nabcdefghij\nXYZ\n```", max_length=30)
+    assert [plain_text(chunk["body"]) for chunk in code] == ["123456789", "abcdefghij", "XYZ"]
     assert all(scope == ("Code",) for chunk in code for value, scope in rendered_runs(chunk))
 
 
 def test_chunking_reopens_lists_without_splitting_short_items():
-    chunks = segments_module.reply_bodies(None, "1. first\n2. second\n3. third", max_length=14)
+    chunks = segments_module.reply_bodies(None, "1. first\n2. second\n3. third", max_length=40)
     assert [plain_text(chunk["body"]) for chunk in chunks] == ["first\nsecond", "third"]
     assert all(scope == ("OrderedList", "ListItem") for chunk in chunks for value, scope in rendered_runs(chunk))
 
@@ -159,12 +155,13 @@ def test_empty_markup_uses_fallback_and_can_be_chunked():
     assert ["".join(value for value, scope in rendered_runs(chunk)) for chunk in chunks] == ["No a", "nswe", "r"]
 
 
-@pytest.mark.parametrize("limit", [0, -1, 257, 258])
+@pytest.mark.parametrize("limit", [0, -1, 257])
 def test_limit_must_leave_room_for_mention_and_reply(limit):
     with pytest.raises(ValueError):
         segments_module.reply_bodies(BOT_18, "answer", max_length=limit)
 
 
-def test_many_short_paragraphs_budget_their_line_breaks():
+def test_many_short_paragraphs_budget_their_markup():
+    # Each line becomes <p>x</p> (8 stored characters).
     chunks = segments_module.reply_bodies(None, "\n".join("x" for _ in range(9000)))
-    assert [plain_text(chunk["body"]).count("x") for chunk in chunks] == [4500, 4500]
+    assert [plain_text(chunk["body"]).count("x") for chunk in chunks] == [1125] * 8

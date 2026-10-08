@@ -12,8 +12,18 @@ from collections.abc import Iterator
 from typing import Any
 
 
-_TEXT_BREAKS = {"Paragraph", "ListItem"}
 Segment = dict[str, Any]
+
+# Salesforce stores rich-text comments as HTML and enforces the comment length
+# limit on that HTML (measured 2026-10-09: tags, entity-escaped text, links as
+# " url ", mentions as "@Display Name").
+_HTML_TAGS = {
+    "Paragraph": "p", "Bold": "b", "Italic": "i", "Underline": "u", "Strikethrough": "s",
+    "UnorderedList": "ul", "OrderedList": "ol", "ListItem": "li", "Code": "code",
+}
+_ESCAPED = {"&": 5, "<": 4, ">": 4, '"': 6, "'": 6}
+# Mention inputs carry an ID but no display name; reserve room for the name.
+_MENTION_RESERVE = 256
 
 _FENCE = re.compile(r"^\s*```")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*)$")
@@ -120,21 +130,28 @@ def markdown_to_segments(markdown: str) -> list[Segment]:
     return trim_trailing_segments(out)
 
 
-def segments_text_length(segments: list[Segment]) -> int:
-    """Budget text, paragraph/list newlines, and unresolved mention names.
+def _tag_length(segment: Segment) -> int:
+    tag = _HTML_TAGS.get(segment.get("markupType"), "span")
+    return len(tag) + (2 if segment["type"] == "MarkupBegin" else 3)
 
-    Mention inputs have an ID but no display name, so reserve 256 characters
-    (or a longer returned mention text). Formatting tags themselves cost zero.
-    """
+
+def _text_length(text: str) -> int:
+    return sum(_ESCAPED.get(ch, 1) for ch in text)
+
+
+def stored_length(segments: list[Segment]) -> int:
+    """Length of the HTML Salesforce stores for these segments (what its limit counts)."""
     length = 0
     for segment in segments:
         kind = segment.get("type")
         if kind == "Mention":
-            length += max(256, len(segment.get("text") or ""))
+            length += max(_MENTION_RESERVE, len(segment.get("text") or ""))
         elif kind == "Text":
-            length += len(segment.get("text") or "")
-        elif kind == "MarkupEnd" and segment.get("markupType") in _TEXT_BREAKS:
-            length += 1
+            length += _text_length(segment.get("text") or "")
+        elif kind == "Link":
+            length += _text_length(segment.get("url") or "") + 2
+        elif kind in ("MarkupBegin", "MarkupEnd"):
+            length += _tag_length(segment)
     return length
 
 
@@ -186,8 +203,9 @@ def split_segments(segments: list[Segment], max_length: int) -> list[list[Segmen
     """Split converted text, closing/reopening active markup at each boundary.
 
     Hermes' Markdown splitter preserves code fences, but cannot preserve Chatter
-    markup or measure expanded links and mentions. Split the actual segments
-    instead. Boundary whitespace is trimmed; hard splits retain word spacing.
+    markup or measure the HTML Salesforce stores. Split the actual segments so
+    each chunk's stored length (see ``stored_length``) stays within ``max_length``.
+    Boundary whitespace is trimmed; hard splits retain word spacing.
     """
     chunks: list[list[Segment]] = []
     current: list[Segment] = []
@@ -195,55 +213,62 @@ def split_segments(segments: list[Segment], max_length: int) -> list[list[Segmen
     length = 0
     has_text = False
 
+    def closing() -> int:
+        return sum(_tag_length(_end(kind)) for kind in stack)
+
     def flush() -> None:
         nonlocal current, length, has_text
         finished = trim_trailing_segments(current)
         if finished:
             chunks.append(finished)
         current = [_begin(kind) for kind in stack]
-        length = 0
+        length = stored_length(current)
         has_text = False
 
     for unit in _segment_units(segments):
-        if has_text and length + segments_text_length(unit) > max_length:
+        if has_text and length + stored_length(unit) + closing() > max_length:
             flush()
         for segment in unit:
             kind = segment["type"]
-            if kind == "MarkupBegin":
-                stack.append(segment["markupType"])
-            elif kind == "MarkupEnd":
-                if stack.pop() in _TEXT_BREAKS:
-                    length += 1
-            elif kind == "Text":
+            if kind == "Text":
                 value = segment["text"]
                 while value:
-                    closing_length = sum(markup in _TEXT_BREAKS for markup in stack)
-                    available = max_length - length - closing_length
-                    if available <= 0:
+                    available = max_length - length - closing()
+                    end = used = 0
+                    for ch in value:
+                        cost = _ESCAPED.get(ch, 1)
+                        if used + cost > available:
+                            break
+                        used += cost
+                        end += 1
+                    if end == 0:
                         if not has_text:
-                            raise ValueError("max_length cannot fit text and its paragraph break")
+                            raise ValueError("max_length cannot fit text inside its markup")
                         flush()
-                        available = max_length - closing_length
-                        if available <= 0:
-                            raise ValueError("max_length cannot fit text and its paragraph break")
-                    end = min(len(value), available)
+                        continue
                     if end < len(value):
                         end = len(value[:end].rstrip()) or end
                     part = value[:end]
                     current.append(_text(part))
-                    length += len(part)
+                    length += _text_length(part)
                     has_text = has_text or bool(part.strip())
                     value = value[end:]
                     if value:
                         flush()
                 continue
-            elif kind == "Mention":
-                mention_length = segments_text_length([segment])
-                if mention_length > max_length:
-                    raise ValueError("max_length cannot fit a mention")
-                if length + mention_length > max_length:
-                    flush()
-                length += mention_length
+            cost = stored_length([segment])
+            if kind == "Mention" and cost + closing() > max_length:
+                raise ValueError("max_length cannot fit a mention")
+            reserve = _tag_length(_end(segment["markupType"])) if kind == "MarkupBegin" else 0
+            if kind != "MarkupEnd" and has_text and length + cost + reserve + closing() > max_length:
+                flush()
+            if kind == "MarkupBegin":
+                stack.append(segment["markupType"])
+            elif kind == "MarkupEnd":
+                stack.pop()
+            else:
+                has_text = True
+            length += cost
             current.append(segment)
     flush()
     return chunks

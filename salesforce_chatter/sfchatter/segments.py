@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .richtext import markdown_to_segments, segments_text_length, split_segments
+from .richtext import markdown_to_segments, split_segments, stored_length
 
 _BLOCK_END = {"Paragraph", "ListItem"}
 
@@ -66,10 +66,11 @@ def reply_bodies(
 ) -> list[dict[str, Any]]:
     """Build bounded, balanced reply bodies with the requester mentioned once.
 
-    The first chunk reserves 256 characters for the unresolved mention name,
-    plus its separating space. Subsequent chunks contain only reply content.
+    Lengths are measured as the HTML Salesforce stores (its comment limit counts
+    that). The first chunk reserves room for the unresolved mention name plus its
+    separating space. Subsequent chunks contain only reply content.
     """
-    prefix_length = segments_text_length([{"type": "Mention", "id": requester_id}]) + 1 if requester_id else 0
+    prefix_length = stored_length([{"type": "Mention", "id": requester_id}]) + 1 if requester_id else 0
     if max_length <= prefix_length:
         raise ValueError("max_length must leave room for reply text after the mention")
     segments = reply_body(requester_id, text, empty_reply_text=empty_reply_text)["body"]["messageSegments"]
