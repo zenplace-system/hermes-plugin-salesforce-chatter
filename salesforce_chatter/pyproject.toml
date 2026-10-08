@@ -1,0 +1,16 @@
+[project]
+name = "hermes-plugin-salesforce-chatter"
+version = "0.1.0"
+description = "Community Hermes gateway for Salesforce Chatter; not affiliated with Salesforce."
+authors = [{ name = "zenplace Inc." }]
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27,<1",
+    "PyJWT[crypto]>=2.8,<3",
+    "pillow>=10,<13",
+]
+
+[project.urls]
+Homepage = "https://github.com/zenplace-system/hermes-plugin-salesforce-chatter"
+Repository = "https://github.com/zenplace-system/hermes-plugin-salesforce-chatter"

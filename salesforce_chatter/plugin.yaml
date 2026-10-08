@@ -1,0 +1,41 @@
+name: salesforce-chatter
+label: Salesforce Chatter
+kind: platform
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+requires_hermes: ">=0.21.3"
+description: "Community Hermes gateway for Salesforce Chatter mentions and replies; not affiliated with Salesforce."
+author: zenplace Inc.
+license: MIT
+homepage: https://github.com/zenplace-system/hermes-plugin-salesforce-chatter
+tags: [gateway, salesforce, chatter]
+requires_env:
+  - name: SF_CHATTER_LOGIN_URL
+    description: "Salesforce OAuth login URL, such as https://login.salesforce.com or https://test.salesforce.com"
+    password: false
+  - name: SF_CHATTER_CLIENT_ID
+    description: "External Client App consumer key"
+    password: true
+  - name: SF_CHATTER_USERNAME
+    description: "Integration bot Salesforce username"
+    password: false
+  - name: SF_CHATTER_PRIVATE_KEY_PATH
+    description: "Path to the JWT signing private key; restrict file permissions to the service account"
+    password: false
+  - name: SF_CHATTER_BOT_USER_ID
+    description: "Integration bot Salesforce User ID"
+    password: false
+optional_env:
+  - name: SF_CHATTER_ALLOWED_USERS
+    description: "Comma-separated allowed Salesforce User IDs; an empty list denies all requests"
+    password: false
+  - name: SF_CHATTER_ALLOWED_PARENT_IDS
+    description: "Comma-separated allowed group or record IDs; an empty list allows all visible parents"
+    password: false
+  - name: SF_CHATTER_ALLOW_ALL_USERS
+    description: "Hermes gateway authorization flag; does not bypass this plugin's required user allowlist"
+    password: false
+  - name: SF_CHATTER_HOME_CHANNEL
+    description: "Optional group or record ID for scheduled new-post delivery"
+    password: false

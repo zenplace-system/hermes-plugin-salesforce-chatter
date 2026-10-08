@@ -1,0 +1,50 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Lowest supported release (requires_hermes floor) and the moving main branch.
+        hermes-ref: [v2026.9.14, main]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.hermes-ref }}
+          path: .hermes-agent
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Hermes and plugin dependencies
+        run: |
+          uv venv
+          uv pip install -e ./.hermes-agent "pytest>=8" "pytest-asyncio>=0.23" \
+            "httpx>=0.27,<1" "PyJWT[crypto]>=2.8,<3" "pillow>=10,<13"
+
+      - name: Run tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.hermes-agent:${{ github.workspace }}
+        run: |
+          export HERMES_HOME="$(mktemp -d)"
+          uv run --no-sync python -m pytest -q -p no:cacheprovider
+
+      - name: Validate plugin manifest
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.hermes-agent
+        run: |
+          export HERMES_HOME="$(mktemp -d)"
+          uv run --no-sync hermes plugins validate ./salesforce_chatter
