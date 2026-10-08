@@ -1,6 +1,6 @@
 [project]
 name = "hermes-plugin-salesforce-chatter"
-version = "0.1.0"
+version = "0.2.0"
 description = "Community Hermes gateway for Salesforce Chatter; not affiliated with Salesforce."
 authors = [{ name = "zenplace Inc." }]
 license = "MIT"

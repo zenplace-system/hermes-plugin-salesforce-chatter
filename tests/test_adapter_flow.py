@@ -192,19 +192,17 @@ def _png(width, height, text_rows=()):
     return out.getvalue()
 
 
-async def test_long_html_preview_is_posted_as_ordered_readable_pages(adapter, tmp_path, monkeypatch):
+async def test_long_html_preview_stays_one_full_page_image(adapter, tmp_path, monkeypatch):
     import io
     from dataclasses import replace
 
     from PIL import Image
 
-    adapter._settings = replace(adapter._settings, html_preview=True, html_preview_page_height=1000,
-                                html_preview_max_pages=3)
-    # Ink on every row except a blank band at 900-920, so the first cut must land in that band.
-    tall = _png(1280, 2500, text_rows=[y for y in range(2500) if not 900 <= y < 920])
+    adapter._settings = replace(adapter._settings, html_preview=True, html_preview_max_height=8000)
+    tall = _png(1280, 5000, text_rows=range(5000))
 
     async def fake_render(html, **kwargs):
-        assert kwargs["max_height"] == 3000
+        assert kwargs["max_height"] == 8000
         return tall
 
     monkeypatch.setitem(adapter._send_file.__func__.__globals__, "render_html_preview", fake_render)
@@ -213,20 +211,15 @@ async def test_long_html_preview_is_posted_as_ordered_readable_pages(adapter, tm
     assert (await adapter.send_document("0D5A", str(report))).success
     uploads = [c for c in adapter._client.calls if c[0] == "upload"]
     comments = [c for c in adapter._client.calls if c[0] == "comment"]
-    assert [u[1] for u in uploads] == ["report.html", "report-preview-1.png", "report-preview-2.png",
-                                       "report-preview-3.png"]
-    heights = [Image.open(io.BytesIO(u[4])).height for u in uploads[1:]]
-    assert sum(heights) == 2500 and all(h <= 1000 for h in heights)
-    assert 900 < heights[0] <= 920
-    assert [texts(c[2]) for c in comments[1:]] == [
-        "report.html preview (1/3)", "report.html preview (2/3)", "report.html preview (3/3)"]
+    assert [u[1] for u in uploads] == ["report.html", "report-preview.png"]
+    assert Image.open(io.BytesIO(uploads[1][4])).size == (1280, 5000)
+    assert texts(comments[-1][2]) == "report.html preview (image)"
 
 
 async def test_preview_at_the_render_limit_says_it_is_cut(adapter, tmp_path, monkeypatch):
     from dataclasses import replace
 
-    adapter._settings = replace(adapter._settings, html_preview=True, html_preview_page_height=1000,
-                                html_preview_max_pages=2)
+    adapter._settings = replace(adapter._settings, html_preview=True, html_preview_max_height=2000)
 
     async def fake_render(html, **kwargs):
         return _png(1280, kwargs["max_height"], text_rows=range(kwargs["max_height"]))
@@ -235,9 +228,10 @@ async def test_preview_at_the_render_limit_says_it_is_cut(adapter, tmp_path, mon
     report = tmp_path / "report.html"
     report.write_text("<h1>x</h1>")
     assert (await adapter.send_document("0D5A", str(report))).success
+    uploads = [c for c in adapter._client.calls if c[0] == "upload"]
     comments = [c for c in adapter._client.calls if c[0] == "comment"]
+    assert len(uploads) == 2
     assert "download report.html for the rest" in texts(comments[-1][2])
-    assert "for the rest" not in texts(comments[-2][2])
 
 
 async def test_html_document_without_preview_still_sends_html(adapter, tmp_path, monkeypatch):
