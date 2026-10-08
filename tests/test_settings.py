@@ -34,3 +34,14 @@ def test_missing_required_env_raises():
 def test_unknown_feed_raises():
     with pytest.raises(ValueError, match="feed"):
         Settings.load(ENV, {"feed": "company"})
+
+
+@pytest.mark.parametrize("value, expected", [("true", True), ("false", False), (True, True), (False, False)])
+def test_followup_setting_parses_explicit_opt_in(value, expected):
+    assert Settings.load(ENV, {"follow_up_without_mention": value}).follow_up_without_mention is expected
+
+
+def test_approval_hint_can_be_localized_or_disabled():
+    localized = Settings.load(ENV, {"approval_hint": "Mention @{bot_name} to respond."})
+    assert localized.approval_hint.format(bot_name="Assistant") == "Mention @Assistant to respond."
+    assert Settings.load(ENV, {"approval_hint": ""}).approval_hint == ""

@@ -1,10 +1,14 @@
-"""Find posts and comments mentioning the bot through two paths.
+"""Find bot mentions and opt-in thread follow-ups through two paths.
 
 To Me feed covers group and record mentions, polling every 60 seconds per Connect
 REST guidance. SOQL CollaborationGroupFeed probes allowlisted groups more often.
 Comments update the parent post's LastModifiedDate (observed in a production org
 on 2026-10-08), allowing comment mentions to be detected. SOQL consumes the org API
 quota rather than the Chatter REST hourly limit.
+
+Unmentioned follow-ups require an allowlisted author, a strictly earlier bot
+comment, and no mention of another user. Explicit mentions keep their usual
+authorization handling in the adapter.
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ class Candidate:
     post_text: str
     thread_context: str
     attachments: tuple[Attachment, ...] = field(default=())
+    follow_up_without_mention: bool = False
 
 
 def parse_sf_datetime(value: str) -> datetime:
@@ -130,19 +135,41 @@ async def _from_element(client: ChatterReader, s: Settings, el: dict[str, Any], 
     if created >= since and not same_sf_id(actor.get("id"), bot) and mentions_user(el.get("body"), bot):
         out.append(Candidate(el["id"], "post", el["id"], parent.get("id"), parent.get("name"), actor.get("id", ""),
                              actor.get("displayName"), created, post_text, post_text, "", post_files))
-    comments = sorted(await _comments(client, el), key=lambda c: c["createdDate"])
+    comments = sorted(await _comments(client, el), key=lambda c: parse_sf_datetime(c["createdDate"]))
+    first_bot_comment: datetime | None = None
     for index, cm in enumerate(comments):
         user = cm.get("user") or {}
         cm_created = parse_sf_datetime(cm["createdDate"])
-        if cm_created < since or same_sf_id(user.get("id"), bot) or not mentions_user(cm.get("body"), bot):
+        if same_sf_id(user.get("id"), bot):
+            if first_bot_comment is None:
+                first_bot_comment = cm_created
             continue
+        if cm_created < since:
+            continue
+        body = cm.get("body") or {}
+        follow_up = not mentions_user(body, bot)
+        if follow_up:
+            if (
+                not s.follow_up_without_mention
+                or first_bot_comment is None
+                or first_bot_comment >= cm_created
+                or not any(same_sf_id(user.get("id"), allowed) for allowed in s.allowed_user_ids)
+            ):
+                continue
+            if any(
+                seg.get("type") == "Mention"
+                and str((seg.get("record") or {}).get("id") or "").startswith("005")
+                and not same_sf_id((seg.get("record") or {}).get("id"), bot)
+                for seg in body.get("messageSegments") or []
+            ):
+                continue
         earlier = comments[max(0, index - CONTEXT_COMMENTS):index]
         context = "\n".join(_speaker(c) for c in earlier)
         # Include parent attachments so comments can ask about an image in the post.
         files = _attachments(cm) + tuple(f for f in post_files if f.file_id not in {a.file_id for a in _attachments(cm)})
         out.append(Candidate(cm["id"], "comment", el["id"], parent.get("id"), parent.get("name"), user.get("id", ""),
                              user.get("displayName"), cm_created, plain_text(cm.get("body"), drop_mention_of=bot),
-                             post_text, context, files))
+                             post_text, context, files, follow_up_without_mention=follow_up))
     return out
 
 
@@ -164,7 +191,7 @@ async def scan_feed(client: ChatterReader, settings: Settings, since: datetime) 
 
 
 async def probe_groups(client: ChatterReader, settings: Settings, since: datetime) -> list[Candidate]:
-    """Find mention candidates in allowlisted group posts updated since the cursor."""
+    """Find candidates in allowlisted group posts updated since the cursor."""
     groups = settings.group_ids
     if not groups:
         return []

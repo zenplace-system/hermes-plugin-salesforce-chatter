@@ -44,6 +44,8 @@ class Settings:
     probe_interval_seconds: int = 5
     allowed_parent_ids: tuple[str, ...] = ()
     allowed_user_ids: tuple[str, ...] = ()
+    # Only allowlisted authors can continue after a bot comment without mentioning it.
+    follow_up_without_mention: bool = False
     dry_run: bool = True
     max_replies_per_hour: int = 20
     max_catchup_hours: int = 24
@@ -55,6 +57,7 @@ class Settings:
     failure_text: str = "Failed to generate a reply. Please wait and mention me again."
     unauthorized_text: str = "Only authorized users can use this assistant."
     commands_text: str = "Available Chatter commands: /new /reset /stop /approve /deny. Write questions in plain text."
+    approval_hint: str = 'Reply with a comment that mentions me: "@{bot_name} approve" or "@{bot_name} deny".'
     empty_post_text: str = "(No message text)"
     empty_reply_text: str = "(Empty reply)"
     attachment_too_large_note: str = "[Attachment '{title}' was not loaded because it is too large]"
@@ -90,6 +93,7 @@ class Settings:
             probe_interval_seconds=max(3, int(extra.get("probe_interval_seconds", 5))),
             allowed_parent_ids=_ids(env.get("SF_CHATTER_ALLOWED_PARENT_IDS") or extra.get("allowed_parent_ids")),
             allowed_user_ids=_ids(env.get("SF_CHATTER_ALLOWED_USERS") or extra.get("allowed_user_ids")),
+            follow_up_without_mention=_bool(extra.get("follow_up_without_mention"), False),
             dry_run=_bool(extra.get("dry_run"), True),
             max_replies_per_hour=int(extra.get("max_replies_per_hour", 20)),
             max_catchup_hours=int(extra.get("max_catchup_hours", 24)),
@@ -100,6 +104,7 @@ class Settings:
             failure_text=str(extra.get("failure_text", cls.failure_text)),
             unauthorized_text=str(extra.get("unauthorized_text", cls.unauthorized_text)),
             commands_text=str(extra.get("commands_text", cls.commands_text)),
+            approval_hint=str(extra.get("approval_hint", cls.approval_hint)),
             empty_post_text=str(extra.get("empty_post_text", cls.empty_post_text)),
             empty_reply_text=str(extra.get("empty_reply_text", cls.empty_reply_text)),
             attachment_too_large_note=str(extra.get("attachment_too_large_note", cls.attachment_too_large_note)),
