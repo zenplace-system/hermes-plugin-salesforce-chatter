@@ -27,7 +27,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"  # the interpreter Hermes installs; main relies on 3.14-only deps
 
       - name: Install Hermes and plugin dependencies
         run: |
