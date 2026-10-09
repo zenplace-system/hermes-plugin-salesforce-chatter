@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .preview import DEFAULT_IMAGE
+
 FEEDS = ("to_me", "news")
 _REQUIRED = {
     "login_url": "SF_CHATTER_LOGIN_URL",
@@ -53,7 +55,7 @@ class Settings:
     unauthorized_reply: bool = True
     # Optionally attach a PNG preview because Chatter cannot preview HTML.
     html_preview: bool = False
-    preview_image: str = "nousresearch/hermes-sandbox:desktop"
+    preview_image: str = DEFAULT_IMAGE
     # The preview is one image, 1280 px wide; taller pages are cut at this height.
     html_preview_max_height: int = 8000
     failure_text: str = "Failed to generate a reply. Please wait and mention me again."
@@ -103,7 +105,7 @@ class Settings:
             max_attachment_bytes=int(extra.get("max_attachment_mb", 25)) * 1024 * 1024,
             unauthorized_reply=_bool(extra.get("unauthorized_reply"), True),
             html_preview=_bool(extra.get("html_preview"), False),
-            preview_image=str(extra.get("preview_image") or "nousresearch/hermes-sandbox:desktop"),
+            preview_image=str(extra.get("preview_image") or DEFAULT_IMAGE),
             html_preview_max_height=max(400, min(30000, int(extra.get("html_preview_max_height", cls.html_preview_max_height)))),
             failure_text=str(extra.get("failure_text", cls.failure_text)),
             unauthorized_text=str(extra.get("unauthorized_text", cls.unauthorized_text)),

@@ -17,7 +17,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_IMAGE = "nousresearch/hermes-sandbox:desktop"
+# Pinned by digest so a moved tag cannot change what renders model-generated HTML.
+DEFAULT_IMAGE = "nousresearch/hermes-sandbox:desktop@sha256:669abbd2df186067be9c645eee5fddb8764c9fe8b9edd28625ec3a61e6685443"
 _DOCKER_FALLBACKS = ("/usr/local/bin/docker", "/opt/homebrew/bin/docker", "~/.orbstack/bin/docker")
 # Locate Chromium inside the image's versioned Playwright directory.
 _CHROME_SCRIPT = (

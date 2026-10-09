@@ -1,19 +1,60 @@
+import ipaddress
+
 import httpx
 import pytest
 
 from sfchatter import media
 
 
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
 @pytest.fixture
 def serve(monkeypatch):
-    client_type = httpx.AsyncClient
+    """Serve requests from a handler instead of the network.
+
+    IP-literal URLs go through Hermes's real ``is_safe_url`` (no DNS needed);
+    hostnames are treated as public so tests never depend on DNS.
+    """
+    real_is_safe_url = media.is_safe_url
+    monkeypatch.setattr(media, "is_safe_url",
+                        lambda url: real_is_safe_url(url) if _is_ip_literal(httpx.URL(url).host) else True)
 
     def install(handler):
-        monkeypatch.setattr(media.httpx, "AsyncClient", lambda **kwargs: client_type(
+        monkeypatch.setattr(media, "create_ssrf_safe_async_client", lambda **kwargs: httpx.AsyncClient(
             transport=httpx.MockTransport(handler), **kwargs
         ))
 
     return install
+
+
+@pytest.mark.parametrize("url", ["https://127.0.0.1/x.png", "https://10.0.0.1/", "https://169.254.169.254/latest",
+                                 "https://[::1]/x.png"])
+async def test_refuses_private_addresses_without_request(serve, url):
+    def handler(request):
+        pytest.fail("Private address was requested")
+
+    serve(handler)
+    with pytest.raises(media.UnsafeImageURL):
+        await media.download_image(url, max_bytes=10)
+
+
+async def test_refuses_public_to_private_redirect(serve):
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(302, headers={"location": "https://10.0.0.1/secret.png"})
+
+    serve(handler)
+    with pytest.raises(media.UnsafeImageURL):
+        await media.download_image("https://example.com/start", max_bytes=10)
+    assert seen == ["https://example.com/start"]
 
 
 async def test_https_redirects_return_image_without_authorization(serve):
